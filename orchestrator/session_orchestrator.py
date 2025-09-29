@@ -3,13 +3,13 @@ import asyncio
 import logging
 import time
 import numpy as np
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from pathlib import Path
 
 from core.events import (
     Event, TextInputEvent, VoiceInputEvent, CommandEvent,
     AgentResponseEvent, ErrorEvent, StatusEvent, VoiceOutputEvent,
-    VoiceConnectionEvent
+    VoiceConnectionEvent, Attachment
 )
 from core.bus import EventBus
 from core.profiles import ProfileLoader, ChannelProfile
@@ -95,7 +95,12 @@ class SessionOrchestrator:
             await self.session_db.update_activity(event.channel_id)
 
             # Process with agent
-            await self._process_with_agent(event.channel_id, event.content, profile)
+            await self._process_with_agent(
+                event.channel_id,
+                event.content,
+                profile,
+                attachments=event.attachments
+            )
 
         except Exception as e:
             logger.error(f"Error handling text input: {e}", exc_info=True)
@@ -203,7 +208,8 @@ class SessionOrchestrator:
         self,
         channel_id: str,
         text: str,
-        profile: ChannelProfile
+        profile: ChannelProfile,
+        attachments: Optional[List[Attachment]] = None
     ):
         """Process input with appropriate agent engine"""
 
@@ -220,7 +226,7 @@ class SessionOrchestrator:
                 conversation_id = self.conversation_ids.get(channel_id)
 
                 # Stream responses from engine
-                async for event in engine.send_input(text, channel_id, conversation_id):
+                async for event in engine.send_input(text, channel_id, conversation_id, attachments):
                     # Record to transcript
                     if profile.session.transcript_store:
                         await self.transcripts.append(channel_id, event)

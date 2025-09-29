@@ -11,6 +11,7 @@ A single-application Discord bot that exposes Codex CLI or Claude Code CLI as Di
 ✅ **Superior Voice Quality**: Kokoro TTS (primary) with Piper TTS fallback
 ✅ **Multi-Channel Agents**: Different Discord channels map to different agent configurations
 ✅ **Session Persistence**: Conversations persist across bot restarts with transcript replay
+✅ **Attachment Support**: Send images, PDFs, and files for agent analysis
 ✅ **Mobile Access**: Full functionality from Discord mobile app (iPhone, Android)
 ✅ **Self-Hosted**: Runs on always-on PC, no cloud dependencies
 ✅ **Telemetry**: Structured logging with task timing and error tracking
@@ -135,6 +136,14 @@ session:
 2. Type your message: "Check my calendar for tomorrow"
 3. Bot responds with agent output
 4. Continue conversation - context is maintained
+
+### Attachment Support
+
+1. Upload image, PDF, or file to Discord channel with your message
+2. Bot downloads attachment to local storage
+3. File path is included in prompt context for agent to read
+4. Agent can analyze images, PDFs, spreadsheets, or any file type
+5. **Storage**: Files saved to `artifacts/discord/<channel>/<message>/` (max 10MB per file)
 
 ### Voice Interaction
 

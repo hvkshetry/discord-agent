@@ -3,9 +3,9 @@ import asyncio
 import json
 import logging
 import os
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Optional, List
 
-from core.events import Event, AgentResponseEvent, ToolCallEvent, StatusEvent, ErrorEvent
+from core.events import Event, AgentResponseEvent, ToolCallEvent, StatusEvent, ErrorEvent, Attachment
 
 logger = logging.getLogger(__name__)
 
@@ -45,16 +45,33 @@ class ClaudeEngine:
             logger.error(f"Failed to start Claude Code: {e}")
             raise
 
-    async def send_input(self, text: str, session_id: str, conversation_id: Optional[str] = None) -> AsyncIterator[Event]:
+    async def send_input(
+        self,
+        text: str,
+        session_id: str,
+        conversation_id: Optional[str] = None,
+        attachments: Optional[List[Attachment]] = None
+    ) -> AsyncIterator[Event]:
         """Send prompt and stream events"""
         if not self.process or not self.process.stdin:
             raise RuntimeError("Claude Code process not started")
 
-        logger.debug(f"Sending to Claude Code: {text[:100]}...")
+        # Build prompt with file paths (same approach as Codex)
+        if attachments:
+            attachment_info = "\n\nAttached files:\n" + "\n".join([
+                f"- {att.filename} ({att.content_type or 'unknown type'}): {att.path}"
+                for att in attachments
+            ])
+            prompt = (text or "Please analyze the attached files.") + attachment_info
+            logger.info(f"Added {len(attachments)} file path(s) to prompt")
+        else:
+            prompt = text
+
+        logger.debug(f"Sending to Claude Code: {prompt[:100]}...")
 
         try:
             # Send prompt
-            self.process.stdin.write(text.encode() + b"\n")
+            self.process.stdin.write(prompt.encode() + b"\n")
             await self.process.stdin.drain()
 
             # Read streaming responses

@@ -40,6 +40,9 @@ console_log.txt
 discord_log.txt
 debug.log
 
+# Downloaded attachments
+artifacts/
+
 # Models (too large for git)
 models/
 voices/
