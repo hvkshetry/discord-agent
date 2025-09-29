@@ -1,0 +1,35 @@
+# Code Review Assistant Channel Profile Example
+# Copy to code.yaml and customize
+
+channel:
+  ids: ["YOUR_DISCORD_CHANNEL_ID"]  # Discord channel ID (right-click channel → Copy ID)
+  names: ["code", "dev", "review", "programming"]
+  description: "Code review and debugging specialist"
+
+engine:
+  type: claude-code
+  config_home: ~/agents/code/.claude
+  timeout: 900
+
+mcp_servers:
+  # Example: GitHub MCP server
+  - name: github-tools
+    command: node
+    args: ["/path/to/github-mcp/index.js"]
+    env:
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+    enabled: true
+
+voice:
+  enabled: true
+  stt_provider: whisper
+  tts_provider: kokoro
+  tts_fallback: piper
+  tts_voice: am_adam  # Male voice for variety
+  silence_threshold: 1.5
+  stream_chunks: true  # Stream intermediate responses for long queries
+
+session:
+  persist: true
+  timeout: 3600
+  transcript_store: true

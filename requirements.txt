@@ -1,0 +1,34 @@
+# Discord Agent Requirements
+
+# Core
+py-cord>=2.6.0  # Use Pycord instead of discord.py (has built-in voice recording)
+pydantic>=2.0.0
+pyyaml>=6.0
+
+# Logging and telemetry
+structlog>=24.0.0
+
+# Voice - STT
+faster-whisper>=1.0.0
+
+# Voice - TTS
+kokoro-onnx>=0.1.0
+soundfile>=0.12.0
+
+# Voice - VAD
+webrtcvad>=2.0.10
+
+# Voice - TTS fallback
+piper-tts>=1.2.0
+
+# Discord voice (Pycord has built-in voice recording, no extension needed)
+PyNaCl>=1.5.0
+
+# Audio processing
+numpy>=1.24.0
+
+# Persistence
+aiosqlite>=0.19.0
+
+# Utilities
+python-dotenv>=1.0.0

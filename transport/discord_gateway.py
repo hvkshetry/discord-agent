@@ -8,15 +8,66 @@ import numpy as np
 from typing import Dict, Optional
 from collections import deque
 import time
+import socket
+
+from discord import voice_client as discord_voice_client
+from discord.utils import MISSING
 
 from core.events import (
     Event, TextInputEvent, VoiceInputEvent, CommandEvent,
-    AgentResponseEvent, ToolCallEvent, StatusEvent, ErrorEvent, VoiceOutputEvent
+    AgentResponseEvent, ToolCallEvent, StatusEvent, ErrorEvent, VoiceOutputEvent,
+    VoiceConnectionEvent
 )
 from core.bus import EventBus
 from core.profiles import ProfileLoader
+from voice.vad_sink import VADSink
 
 logger = logging.getLogger(__name__)
+
+
+# Monkey patch Pycord 2.6.x voice handshake race condition
+if not getattr(
+    discord_voice_client.VoiceClient.on_voice_server_update,
+    "__discord_agent_patched__",
+    False
+):
+    async def _safe_voice_server_update(self, data):
+        if self._voice_server_complete.is_set():
+            discord_voice_client._log.info("Ignoring extraneous voice server update.")
+            return
+
+        self.token = data.get("token")
+        self.server_id = int(data["guild_id"])
+        endpoint = data.get("endpoint")
+
+        if endpoint is None or self.token is None:
+            discord_voice_client._log.warning(
+                "Awaiting endpoint... This requires waiting. If timeout occurred "
+                "consider raising the timeout and reconnecting."
+            )
+            return
+
+        self.endpoint = endpoint.removeprefix("wss://")
+        self.endpoint_ip = MISSING
+
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.setblocking(False)
+
+        if not self._handshaking:
+            ws = getattr(self, "ws", MISSING)
+            if ws is MISSING:
+                discord_voice_client._log.warning(
+                    "Voice server update received before websocket initialisation; "
+                    "skipping websocket close"
+                )
+            else:
+                await ws.close(4000)
+            return
+
+        self._voice_server_complete.set()
+
+    _safe_voice_server_update.__discord_agent_patched__ = True
+    discord_voice_client.VoiceClient.on_voice_server_update = _safe_voice_server_update
 
 
 class DiscordGateway:
@@ -53,6 +104,7 @@ class DiscordGateway:
         self.voice_clients: Dict[str, discord.VoiceClient] = {}
         self.voice_buffers: Dict[str, deque] = {}
         self.last_audio_time: Dict[str, float] = {}
+        self.voice_connecting: set[str] = set()
 
         # Simple message tracking for multi-turn conversations
         self.response_messages: Dict[str, discord.Message] = {}
@@ -61,6 +113,9 @@ class DiscordGateway:
         # Voice output state
         self.voice_output_queues: Dict[str, asyncio.Queue] = {}
         self.voice_player_tasks: Dict[str, asyncio.Task] = {}
+
+        # Gateway reconnect tracking
+        self._first_ready = True
 
         # Setup event handlers
         self._setup_discord_handlers()
@@ -73,9 +128,19 @@ class DiscordGateway:
         async def on_ready():
             logger.info(f"Discord bot ready: {self.bot.user}")
 
+            if not self._first_ready and self.voice_clients:
+                logger.warning("Gateway reconnected - forcing voice client reconnection to rebuild encryption keys")
+                await self._reconnect_voice_clients()
+
+            self._first_ready = False
+
         @self.bot.event
         async def on_message(message: discord.Message):
             await self._handle_message(message)
+
+        @self.bot.event
+        async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+            await self._handle_voice_state_update(member, before, after)
 
         @self.bot.command(name="join")
         async def join_voice(ctx: commands.Context):
@@ -139,33 +204,14 @@ class DiscordGateway:
         voice_channel = ctx.author.voice.channel
         channel_id = str(ctx.channel.id)
 
-        # Check if voice is configured for this channel
         profile = self.profiles.get_profile(channel_id)
         if not profile or not profile.voice or not profile.voice.enabled:
             await ctx.send("Voice is not configured for this channel")
             return
 
         try:
-            # Connect to voice
-            voice_client = await voice_channel.connect()
-            self.voice_clients[channel_id] = voice_client
-
-            # Start recording
-            voice_client.start_recording(
-                discord.sinks.WaveSink(),
-                self._voice_receive_callback,
-                ctx.channel
-            )
-
-            # Start voice output queue and player
-            self.voice_output_queues[channel_id] = asyncio.Queue()
-            self.voice_player_tasks[channel_id] = asyncio.create_task(
-                self._voice_player_loop(channel_id)
-            )
-            logger.info(f"Voice output player started for {channel_id}")
-
+            await self._ensure_voice_connection(ctx.channel, voice_channel)
             await ctx.send(f"Joined {voice_channel.name}")
-            logger.info(f"Joined voice channel: {voice_channel.name}")
 
         except Exception as e:
             logger.error(f"Error joining voice: {e}", exc_info=True)
@@ -179,25 +225,8 @@ class DiscordGateway:
             await ctx.send("Not in a voice channel")
             return
 
-        voice_client = self.voice_clients[channel_id]
-        await voice_client.disconnect()
-        del self.voice_clients[channel_id]
-
-        if channel_id in self.voice_buffers:
-            del self.voice_buffers[channel_id]
-        if channel_id in self.last_audio_time:
-            del self.last_audio_time[channel_id]
-
-        # Stop voice output player
-        if channel_id in self.voice_player_tasks:
-            self.voice_player_tasks[channel_id].cancel()
-            del self.voice_player_tasks[channel_id]
-
-        if channel_id in self.voice_output_queues:
-            del self.voice_output_queues[channel_id]
-
+        await self._stop_voice_connection(channel_id)
         await ctx.send("Left voice channel")
-        logger.info(f"Left voice channel for {channel_id}")
 
     async def _reset_session(self, ctx: commands.Context):
         """Reset agent session"""
@@ -210,6 +239,229 @@ class DiscordGateway:
         ))
 
         await ctx.send("Session reset requested")
+
+    async def _ensure_voice_connection(
+        self,
+        text_channel: discord.TextChannel,
+        voice_channel: discord.VoiceChannel
+    ):
+        channel_id = str(text_channel.id)
+        voice_channel_id = str(voice_channel.id)
+
+        if channel_id in self.voice_connecting:
+            logger.debug(f"Already connecting to voice for {channel_id}, skipping")
+            return
+
+        profile = self.profiles.get_profile(channel_id)
+        if not profile or not profile.voice or not profile.voice.enabled:
+            logger.warning(f"Voice not configured for channel {channel_id}")
+            return
+
+        if channel_id in self.voice_clients:
+            existing_vc = self.voice_clients[channel_id]
+            if existing_vc.channel.id == voice_channel.id:
+                logger.debug(f"Already connected to {voice_channel.name}")
+                return
+            else:
+                logger.info(f"Moving from {existing_vc.channel.name} to {voice_channel.name}")
+                await self._stop_voice_connection(channel_id)
+
+        self.voice_connecting.add(channel_id)
+        try:
+            voice_client = await voice_channel.connect()
+            self.voice_clients[channel_id] = voice_client
+
+            vad_sink = VADSink(
+                on_utterance=self._handle_vad_utterance,
+                channel_id=channel_id,
+                vad_level=2,
+                frame_ms=20,
+                silence_ms=700  # Increased to handle natural pauses in speech
+            )
+
+            voice_client.start_recording(
+                vad_sink,
+                self._voice_receive_callback,
+                text_channel
+            )
+
+            self.voice_output_queues[channel_id] = asyncio.Queue()
+            self.voice_player_tasks[channel_id] = asyncio.create_task(
+                self._voice_player_loop(channel_id)
+            )
+
+            await self.bus.publish(VoiceConnectionEvent(
+                channel_id=channel_id,
+                state="joined",
+                voice_channel_id=voice_channel_id,
+                text_channel_id=channel_id
+            ))
+
+            logger.info(f"Joined voice channel {voice_channel.name} for text channel {channel_id}")
+
+        except Exception as e:
+            logger.error(f"Error in _ensure_voice_connection: {e}", exc_info=True)
+            raise
+        finally:
+            self.voice_connecting.discard(channel_id)
+
+    async def _stop_voice_connection(self, channel_id: str):
+        if channel_id not in self.voice_clients:
+            logger.debug(f"No voice client for {channel_id}")
+            return
+
+        try:
+            voice_client = self.voice_clients[channel_id]
+            voice_channel_id = str(voice_client.channel.id)
+
+            try:
+                voice_client.stop_recording()
+            except Exception as e:
+                logger.warning(f"Error stopping recording: {e}")
+
+            await voice_client.disconnect()
+            del self.voice_clients[channel_id]
+
+            if channel_id in self.voice_buffers:
+                del self.voice_buffers[channel_id]
+            if channel_id in self.last_audio_time:
+                del self.last_audio_time[channel_id]
+
+            if channel_id in self.voice_player_tasks:
+                self.voice_player_tasks[channel_id].cancel()
+                del self.voice_player_tasks[channel_id]
+
+            if channel_id in self.voice_output_queues:
+                del self.voice_output_queues[channel_id]
+
+            await self.bus.publish(VoiceConnectionEvent(
+                channel_id=channel_id,
+                state="left",
+                voice_channel_id=voice_channel_id,
+                text_channel_id=channel_id
+            ))
+
+            logger.info(f"Left voice channel for {channel_id}")
+
+        except Exception as e:
+            logger.error(f"Error in _stop_voice_connection: {e}", exc_info=True)
+
+    async def _reconnect_voice_clients(self):
+        """Force reconnect all voice clients to rebuild encryption keys after gateway reconnect"""
+        reconnect_info = []
+
+        for channel_id, voice_client in list(self.voice_clients.items()):
+            try:
+                voice_channel = voice_client.channel
+                text_channel_id = int(channel_id)
+                text_channel = self.bot.get_channel(text_channel_id)
+
+                if text_channel and voice_channel:
+                    reconnect_info.append((text_channel, voice_channel))
+                    await self._stop_voice_connection(channel_id)
+                    logger.info(f"Disconnected voice for {channel_id} to prepare for reconnect")
+
+            except Exception as e:
+                logger.error(f"Error disconnecting voice client {channel_id}: {e}", exc_info=True)
+
+        await asyncio.sleep(0.5)
+
+        for text_channel, voice_channel in reconnect_info:
+            try:
+                await self._ensure_voice_connection(text_channel, voice_channel)
+                logger.info(f"Reconnected voice for {text_channel.id} with fresh encryption keys")
+            except Exception as e:
+                logger.error(f"Error reconnecting voice for {text_channel.id}: {e}", exc_info=True)
+
+    async def _handle_vad_utterance(self, channel_id: str, user_id: int, pcm16_data: bytes, metadata: dict):
+        try:
+            logger.info(f"VAD utterance from user {user_id} in channel {channel_id}: {len(pcm16_data)} bytes, {metadata.get('duration', 0):.2f}s")
+
+            await self.bus.publish(VoiceInputEvent(
+                channel_id=channel_id,
+                user_id=str(user_id),
+                audio_data=pcm16_data
+            ))
+
+        except Exception as e:
+            logger.error(f"Error in _handle_vad_utterance: {e}", exc_info=True)
+
+    async def _handle_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState
+    ):
+        if member.bot:
+            return
+
+        if before.channel is None and after.channel is not None:
+            result = self.profiles.get_profile_for_voice_channel(str(after.channel.id))
+            if not result:
+                logger.debug(f"No profile mapped to voice channel {after.channel.name} ({after.channel.id})")
+                return
+
+            text_channel_id, profile = result
+            text_channel = self.bot.get_channel(int(text_channel_id))
+
+            if not text_channel:
+                logger.error(f"Text channel {text_channel_id} not found for voice channel {after.channel.name}")
+                return
+
+            logger.info(f"{member.name} joined voice channel {after.channel.name}, auto-joining")
+            try:
+                await self._ensure_voice_connection(text_channel, after.channel)
+            except Exception as e:
+                logger.error(f"Failed to auto-join voice: {e}")
+
+        elif before.channel is not None and after.channel is None:
+            result = self.profiles.get_profile_for_voice_channel(str(before.channel.id))
+            if not result:
+                return
+
+            text_channel_id, profile = result
+
+            if text_channel_id in self.voice_clients:
+                voice_client = self.voice_clients[text_channel_id]
+                remaining_users = [m for m in voice_client.channel.members if not m.bot]
+
+                if not remaining_users:
+                    logger.info(f"No users left in voice channel, disconnecting")
+                    try:
+                        await self._stop_voice_connection(text_channel_id)
+                    except Exception as e:
+                        logger.error(f"Failed to disconnect voice: {e}")
+
+        elif before.channel is not None and after.channel is not None and before.channel != after.channel:
+            before_result = self.profiles.get_profile_for_voice_channel(str(before.channel.id))
+            after_result = self.profiles.get_profile_for_voice_channel(str(after.channel.id))
+
+            if before_result:
+                before_text_channel_id, _ = before_result
+
+                if before_text_channel_id in self.voice_clients:
+                    voice_client = self.voice_clients[before_text_channel_id]
+                    if voice_client.channel.id == before.channel.id:
+                        logger.info(f"{member.name} moved from {before.channel.name}")
+
+                        remaining_users = [m for m in voice_client.channel.members if not m.bot]
+                        if not remaining_users:
+                            logger.info(f"No users left in {before.channel.name}, disconnecting")
+                            try:
+                                await self._stop_voice_connection(before_text_channel_id)
+                            except Exception as e:
+                                logger.error(f"Failed to disconnect voice: {e}")
+
+            if after_result:
+                after_text_channel_id, after_profile = after_result
+                after_text_channel = self.bot.get_channel(int(after_text_channel_id))
+
+                if after_text_channel:
+                    logger.info(f"{member.name} moved to {after.channel.name}, joining")
+                    try:
+                        await self._ensure_voice_connection(after_text_channel, after.channel)
+                    except Exception as e:
+                        logger.error(f"Failed to follow user to new channel: {e}")
 
     async def _voice_receive_callback(self, sink: discord.sinks.WaveSink, channel: discord.TextChannel):
         """
