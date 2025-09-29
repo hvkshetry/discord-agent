@@ -1,0 +1,1 @@
+"""CLI engine adapters for Discord Agent"""

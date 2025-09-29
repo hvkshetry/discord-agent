@@ -1,0 +1,41 @@
+# Office Assistant Channel Profile Example
+# Copy to office.yaml and customize
+
+channel:
+  ids: ["YOUR_DISCORD_CHANNEL_ID"]  # Discord channel ID (right-click channel → Copy ID)
+  names: ["office", "work", "o365"]
+  description: "Microsoft 365 and Office specialist"
+
+engine:
+  type: codex
+  config_home: ~/agents/office/.codex
+  timeout: 600
+
+mcp_servers:
+  # Example: Microsoft Graph MCP server
+  - name: microsoft-graph
+    command: node
+    args: ["/path/to/graph-mcp/index.js"]
+    env:
+      GRAPH_API_KEY: ${GRAPH_API_KEY}
+    enabled: true
+
+  # Example: Calendar MCP server
+  - name: calendar-tools
+    command: node
+    args: ["/path/to/calendar-mcp/index.js"]
+    enabled: true
+
+voice:
+  enabled: true
+  stt_provider: whisper
+  tts_provider: kokoro
+  tts_fallback: piper
+  tts_voice: af_sky  # Professional female voice
+  silence_threshold: 1.5
+  stream_chunks: true  # Stream intermediate responses for long queries
+
+session:
+  persist: true
+  timeout: 3600
+  transcript_store: true

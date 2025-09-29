@@ -1,0 +1,38 @@
+# Discord Agent Configuration
+# Copy to config.yaml and customize
+
+# Discord bot settings
+discord:
+  # Get token from https://discord.com/developers/applications
+  token: ${DISCORD_BOT_TOKEN}
+  command_prefix: "!"
+
+# Channel profile directory (contains YAML files mapping channels to agents)
+profiles_dir: ./channels
+
+# State persistence directory
+state_dir: ./state
+
+# Voice provider settings
+voice:
+  stt_enabled: true
+  tts_enabled: true
+
+  whisper:
+    model: base  # tiny/base/small/medium/large
+
+  kokoro:
+    voice: af_sky  # af_sky, af_sarah, af_heart, am_adam, am_michael
+    lang_code: a   # Language code
+
+  piper:
+    voice_path: null  # Path to Piper voice file (optional, for fallback)
+
+# Session management
+session:
+  max_age_hours: 24  # Auto-cleanup inactive sessions older than this
+
+# Logging
+logging:
+  level: INFO
+  structured: true
