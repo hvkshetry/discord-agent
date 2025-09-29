@@ -3,10 +3,9 @@ import asyncio
 import json
 import logging
 import os
-from typing import AsyncIterator, Optional, Dict
-from pathlib import Path
+from typing import AsyncIterator, Optional, Dict, List
 
-from core.events import Event, AgentResponseEvent, ToolCallEvent, StatusEvent, ErrorEvent
+from core.events import Event, AgentResponseEvent, ToolCallEvent, StatusEvent, ErrorEvent, Attachment
 
 logger = logging.getLogger(__name__)
 
@@ -56,12 +55,29 @@ class CodexEngine:
             logger.error(f"Failed to start Codex: {e}")
             raise
 
-    async def send_input(self, text: str, session_id: str, conversation_id: Optional[str] = None) -> AsyncIterator[Event]:
+    async def send_input(
+        self,
+        text: str,
+        session_id: str,
+        conversation_id: Optional[str] = None,
+        attachments: Optional[List[Attachment]] = None
+    ) -> AsyncIterator[Event]:
         """Send prompt and stream events"""
         if not self.process or not self.process.stdin:
             raise RuntimeError("Codex process not started")
 
         self.request_id += 1
+
+        # Build prompt with file paths (Codex MCP requires string prompt)
+        if attachments:
+            attachment_info = "\n\nAttached files:\n" + "\n".join([
+                f"- {att.filename} ({att.content_type or 'unknown type'}): {att.path}"
+                for att in attachments
+            ])
+            prompt = (text or "Please analyze the attached files.") + attachment_info
+            logger.info(f"Added {len(attachments)} file path(s) to prompt")
+        else:
+            prompt = text
 
         # Use codex-reply for multi-turn conversations
         if conversation_id:
@@ -73,7 +89,7 @@ class CodexEngine:
                     "name": "codex-reply",
                     "arguments": {
                         "conversationId": conversation_id,
-                        "prompt": text
+                        "prompt": prompt
                     }
                 }
             }
@@ -86,7 +102,7 @@ class CodexEngine:
                 "params": {
                     "name": "codex",
                     "arguments": {
-                        "prompt": text,
+                        "prompt": prompt,
                         "approval-policy": "never",
                         "sandbox": "workspace-write"
                     }
@@ -94,7 +110,7 @@ class CodexEngine:
             }
             logger.info("Starting new Codex conversation")
 
-        logger.debug(f"Sending to Codex: {text[:100]}...")
+        logger.debug(f"Sending to Codex: {text[:100] if text else '<no text>'}... with {len(attachments or [])} attachments")
 
         try:
             # Send request

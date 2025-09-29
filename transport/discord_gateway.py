@@ -9,6 +9,7 @@ from typing import Dict, Optional
 from collections import deque
 import time
 import socket
+from pathlib import Path
 
 from discord import voice_client as discord_voice_client
 from discord.utils import MISSING
@@ -16,7 +17,7 @@ from discord.utils import MISSING
 from core.events import (
     Event, TextInputEvent, VoiceInputEvent, CommandEvent,
     AgentResponseEvent, ToolCallEvent, StatusEvent, ErrorEvent, VoiceOutputEvent,
-    VoiceConnectionEvent
+    VoiceConnectionEvent, Attachment
 )
 from core.bus import EventBus
 from core.profiles import ProfileLoader
@@ -186,13 +187,43 @@ class DiscordGateway:
             await self.bot.process_commands(message)
             return
 
-        # Publish text input event
-        logger.info(f"Message from {message.author} in {message.channel}: {message.content[:100]}")
+        # Download attachments
+        saved = []
+        MAX_SIZE = 10 * 1024 * 1024  # 10MB limit
+
+        if message.attachments:
+            base_dir = Path("artifacts/discord") / channel_id / str(message.id)
+            base_dir.mkdir(parents=True, exist_ok=True)
+
+            for index, attachment in enumerate(message.attachments):
+                if attachment.size and attachment.size > MAX_SIZE:
+                    logger.warning(f"Skipping large attachment {attachment.filename}: {attachment.size} bytes")
+                    continue
+
+                try:
+                    data = await attachment.read()
+                    target = base_dir / attachment.filename
+                    target.write_bytes(data)
+
+                    saved.append(Attachment(
+                        id=f"{message.id}-{index}",
+                        filename=attachment.filename,
+                        content_type=attachment.content_type,
+                        size=attachment.size,
+                        path=str(target),
+                    ))
+                    logger.info(f"Downloaded attachment: {attachment.filename} ({attachment.size} bytes)")
+                except Exception as e:
+                    logger.error(f"Failed to download attachment {attachment.filename}: {e}")
+
+        # Publish text input event with attachments
+        logger.info(f"Message from {message.author} in {message.channel}: {message.content[:100]} with {len(saved)} attachments")
 
         await self.bus.publish(TextInputEvent(
             channel_id=channel_id,
             user_id=str(message.author.id),
-            content=message.content
+            content=message.content or "",
+            attachments=saved
         ))
 
     async def _join_voice_channel(self, ctx: commands.Context):

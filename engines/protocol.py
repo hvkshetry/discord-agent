@@ -1,6 +1,6 @@
 """AgentEngine protocol definition"""
-from typing import Protocol, AsyncIterator, Optional
-from core.events import Event
+from typing import Protocol, AsyncIterator, Optional, List
+from core.events import Event, Attachment
 
 
 class AgentEngine(Protocol):
@@ -16,7 +16,13 @@ class AgentEngine(Protocol):
         """
         ...
 
-    async def send_input(self, text: str, session_id: str, conversation_id: Optional[str] = None) -> AsyncIterator[Event]:
+    async def send_input(
+        self,
+        text: str,
+        session_id: str,
+        conversation_id: Optional[str] = None,
+        attachments: Optional[List[Attachment]] = None
+    ) -> AsyncIterator[Event]:
         """
         Send prompt to engine and stream normalized events.
 
@@ -24,6 +30,7 @@ class AgentEngine(Protocol):
             text: User input text
             session_id: Session identifier for context
             conversation_id: Optional conversation ID for multi-turn (Codex)
+            attachments: Optional list of file attachments
 
         Yields:
             Event: Normalized events (AgentResponseEvent, ToolCallEvent, etc.)

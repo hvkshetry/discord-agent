@@ -1,6 +1,6 @@
 """Event types for Discord Agent event bus"""
 from pydantic import BaseModel, Field
-from typing import Literal, Optional, Any, Dict
+from typing import Literal, Optional, Any, Dict, List
 from datetime import datetime
 
 
@@ -11,11 +11,21 @@ class Event(BaseModel):
     timestamp: float = Field(default_factory=lambda: datetime.now().timestamp())
 
 
+class Attachment(BaseModel):
+    """File attachment metadata"""
+    id: str
+    filename: str
+    content_type: Optional[str] = None
+    size: Optional[int] = None
+    path: str  # absolute path to downloaded file
+
+
 class TextInputEvent(Event):
     """User text message event"""
     type: Literal["text_input"] = "text_input"
     user_id: str
     content: str
+    attachments: List[Attachment] = Field(default_factory=list)
 
 
 class VoiceInputEvent(Event):
