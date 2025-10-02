@@ -555,16 +555,10 @@ class DiscordGateway:
 
             # Handle the event
             if event.content:  # Non-empty content
-                if channel_id in self.response_messages:
-                    # Append to existing message
-                    message = self.response_messages[channel_id]
-                    current_content = message.content
-                    new_content = current_content + "\n\n" + event.content
-                    await message.edit(content=self._truncate_message(new_content))
-                else:
-                    # Create new message
-                    message = await channel.send(self._truncate_message(event.content))
-                    self.response_messages[channel_id] = message
+                # Always send new message for each complete response
+                # (Claude Code sends multiple complete assistant messages, not deltas)
+                message = await channel.send(self._truncate_message(event.content))
+                self.response_messages[channel_id] = message
 
             # No cleanup needed - keep request_id tracking for multi-turn detection
 
@@ -590,8 +584,10 @@ class DiscordGateway:
             # Add arguments as fields
             for key, value in event.arguments.items():
                 value_str = str(value)
-                if len(value_str) > 1024:
-                    value_str = value_str[:1021] + "..."
+                # Discord limit is 1024 chars per field value
+                # Account for ``` wrapper (6 chars) and truncation marker (3 chars)
+                if len(value_str) > 1015:
+                    value_str = value_str[:1015] + "..."
                 embed.add_field(name=key, value=f"```{value_str}```", inline=False)
 
             await channel.send(embed=embed)
