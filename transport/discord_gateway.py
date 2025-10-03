@@ -574,6 +574,11 @@ class DiscordGateway:
             if not channel:
                 return
 
+            # Skip tool embeds when voice is active (awkward when spoken via TTS)
+            if event.channel_id in self.voice_clients:
+                logger.debug(f"Suppressing tool embed in voice mode: {event.tool_name}")
+                return
+
             # Create rich embed for tool call
             embed = discord.Embed(
                 title=f"🔧 {event.tool_name}",
