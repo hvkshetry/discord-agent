@@ -67,6 +67,9 @@ class SessionOrchestrator:
         # Voice channel connection state
         self.voice_active_channels: Dict[str, float] = {}
 
+        # Track which channels have received voice optimization prompt
+        self.voice_prompted_sessions: set = set()
+
     def subscribe_to_events(self):
         """Register event handlers"""
         self.bus.subscribe("text_input", self._handle_text_input)
@@ -199,6 +202,16 @@ class SessionOrchestrator:
             elif event.state == "left":
                 if event.channel_id in self.voice_active_channels:
                     del self.voice_active_channels[event.channel_id]
+
+                # Clear voice prompt tracking when leaving voice
+                if event.channel_id in self.voice_prompted_sessions:
+                    self.voice_prompted_sessions.remove(event.channel_id)
+
+                # Clear conversation ID to avoid voice instructions lingering in history
+                if event.channel_id in self.conversation_ids:
+                    del self.conversation_ids[event.channel_id]
+                    logger.info(f"Cleared conversation ID on voice disconnect: {event.channel_id}")
+
                 logger.info(f"Voice channel left for {event.channel_id}")
 
         except Exception as e:
@@ -225,6 +238,19 @@ class SessionOrchestrator:
                 # Get conversation ID for multi-turn (Codex only)
                 conversation_id = self.conversation_ids.get(channel_id)
 
+                # Inject voice optimization prompt if voice is active (once per session)
+                is_voice_active = (
+                    profile.voice and profile.voice.enabled and
+                    channel_id in self.voice_active_channels
+                )
+
+                if is_voice_active and channel_id not in self.voice_prompted_sessions:
+                    # Compact voice instruction (~40 tokens)
+                    voice_prefix = "You're speaking aloud. Use spoken-friendly phrasing for times, dates, numbers. Skip URLs and markdown. Be conversational. "
+                    text = voice_prefix + text
+                    self.voice_prompted_sessions.add(channel_id)
+                    logger.info(f"Injected voice prompt for channel {channel_id}")
+
                 # Stream responses from engine
                 async for event in engine.send_input(text, channel_id, conversation_id, attachments):
                     # Record to transcript
@@ -233,6 +259,9 @@ class SessionOrchestrator:
 
                     # Publish to bus
                     await self.bus.publish(event)
+
+                    # Yield control to event loop (prevents Discord heartbeat starvation)
+                    await asyncio.sleep(0)
 
                     # Extract conversation ID if Codex response
                     if isinstance(event, AgentResponseEvent):
@@ -318,12 +347,13 @@ class SessionOrchestrator:
         """
         Intelligently buffer and stream voice output.
 
-        Conditions to flush:
-        1. Buffer ends with .?! AND length >= 120
-        2. Buffer length >= 180 (even mid-sentence)
-        3. Timeout: 2.5s since last flush
-        4. is_final=True (flush everything)
+        Engine-specific flush conditions:
+        - Claude Code: Flush on any complete sentence (sends full messages)
+        - Codex: Flush on sentence + ≥30 chars/6 words (sends deltas)
+        - Fallback: 180 chars or 1.5s timeout
         """
+        import re
+
         # Check if streaming is enabled for this profile
         stream_chunks = profile.voice.stream_chunks
 
@@ -337,34 +367,48 @@ class SessionOrchestrator:
         self.voice_buffers[channel_id] += event.content
         buffer = self.voice_buffers[channel_id]
 
+        # Compute new content early (before flush checks)
+        spoken_so_far = self.voice_spoken[channel_id]
+        new_text = buffer[len(spoken_so_far):]
+
         # Check if we should flush
         should_flush = False
 
         if event.is_final:
             # Final chunk - flush everything not yet spoken
             should_flush = True
-        elif stream_chunks:
-            # Check speakable conditions
-            ends_with_sentence = buffer.rstrip().endswith(('.', '!', '?'))
+        elif stream_chunks and new_text.strip():
+            # Engine-specific flush logic
+            engine_type = profile.engine.type
+
+            if engine_type == "claude-code":
+                # Claude Code sends complete messages - flush immediately on sentence end
+                # Regex handles punctuation with quotes/brackets: "Hello.", "Done!", list:\n\n
+                if re.search(r'[.!?]["\')\]]?\s*$', new_text):
+                    should_flush = True
+
+            elif engine_type == "codex":
+                # Codex sends deltas - require minimum length + sentence terminator
+                word_count = len(new_text.split())
+                char_count = len(new_text)
+                has_terminator = re.search(r'[.!?]["\')\]]?\s*$', new_text)
+
+                if has_terminator and (char_count >= 30 or word_count >= 6):
+                    should_flush = True
+
+            # Fallback conditions (all engines)
             buffer_length = len(buffer)
             time_since_last = time.time() - self.last_voice_time[channel_id]
 
-            if ends_with_sentence and buffer_length >= 120:
+            if buffer_length >= 180:
                 should_flush = True
-            elif buffer_length >= 180:
-                should_flush = True
-            elif time_since_last >= 2.5:
+            elif time_since_last >= 1.5:
                 should_flush = True
 
-        if should_flush and buffer.strip():
-            # Only speak new content (dedupe)
-            spoken_so_far = self.voice_spoken[channel_id]
-            new_text = buffer[len(spoken_so_far):]
-
-            if new_text.strip():
-                await self._synthesize_and_emit(channel_id, new_text.strip(), profile)
-                self.voice_spoken[channel_id] = buffer
-                self.last_voice_time[channel_id] = time.time()
+        if should_flush and new_text.strip():
+            await self._synthesize_and_emit(channel_id, new_text.strip(), profile)
+            self.voice_spoken[channel_id] = buffer
+            self.last_voice_time[channel_id] = time.time()
 
             # Clear buffer on final
             if event.is_final:
@@ -394,6 +438,102 @@ class SessionOrchestrator:
 
         return chunks
 
+    def _normalize_for_speech(self, text: str) -> str:
+        """Normalize text for natural TTS output using battle-tested libraries"""
+        import re
+        from datetime import datetime
+        from num2words import num2words
+        import inflect
+
+        p = inflect.engine()
+
+        # Time normalization: "16:00" → "four PM", "14:30" → "two thirty PM"
+        def replace_time(match):
+            hour, minute = int(match.group(1)), int(match.group(2))
+
+            # Convert to 12-hour format
+            period = "AM" if hour < 12 else "PM"
+            hour_12 = hour % 12
+            if hour_12 == 0:
+                hour_12 = 12
+
+            # Use num2words instead of hardcoded arrays
+            hour_words = num2words(hour_12)
+
+            if minute == 0:
+                return f"{hour_words} {period}"
+            else:
+                # Speak minutes naturally: "14:05" → "two oh five PM"
+                if minute < 10:
+                    minute_words = f"oh {num2words(minute)}"
+                else:
+                    minute_words = num2words(minute)
+                return f"{hour_words} {minute_words} {period}"
+
+        text = re.sub(r'\b(\d{1,2}):(\d{2})\b', replace_time, text)
+
+        # Date normalization: "2025-10-03" → "October third, twenty twenty-five"
+        def replace_iso_date(match):
+            try:
+                date = datetime.strptime(match.group(0), '%Y-%m-%d')
+                today = datetime.now().date()
+
+                # Handle relative dates
+                if date.date() == today:
+                    return "today"
+                elif date.date() == today.replace(day=today.day + 1):
+                    return "tomorrow"
+                else:
+                    # Use inflect for ordinal day: "3rd", "21st", etc.
+                    month_name = date.strftime("%B")
+                    day_ordinal = p.ordinal(date.day)  # "3rd" → spoken as "third"
+                    year = date.year
+
+                    # Split year for natural speech: "2025" → "twenty twenty-five"
+                    if year >= 2000 and year < 2100:
+                        century = year // 100
+                        decade = year % 100
+                        if decade == 0:
+                            year_words = f"{num2words(century)} hundred"
+                        else:
+                            year_words = f"{num2words(century)} {num2words(decade)}"
+                    else:
+                        year_words = num2words(year)
+
+                    return f"{month_name} {day_ordinal}, {year_words}"
+            except:
+                return match.group(0)
+
+        text = re.sub(r'\b\d{4}-\d{2}-\d{2}\b', replace_iso_date, text)
+
+        # Convert standalone numbers: "42 tasks" → "forty-two tasks"
+        # But avoid converting times/dates that were already handled
+        def replace_number(match):
+            num = int(match.group(0))
+            # Skip very large numbers (likely IDs/codes)
+            if num > 10000:
+                return match.group(0)
+            return num2words(num)
+
+        text = re.sub(r'(?<!:)\b\d{1,4}\b(?!:)', replace_number, text)
+
+        # Remove URLs (awkward when spoken)
+        text = re.sub(r'https?://\S+', '', text)
+
+        # Remove markdown code blocks
+        text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
+        text = re.sub(r'`[^`]+`', '', text)
+
+        # Remove markdown formatting (keep text)
+        text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)  # Bold
+        text = re.sub(r'\*([^*]+)\*', r'\1', text)      # Italic
+        text = re.sub(r'__([^_]+)__', r'\1', text)      # Underline
+
+        # Clean up extra whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        return text
+
     async def _synthesize_and_emit(
         self,
         channel_id: str,
@@ -406,8 +546,12 @@ class SessionOrchestrator:
             tts_voice = profile.voice.tts_voice
             fallback = profile.voice.tts_fallback
 
+            # Normalize text for natural speech BEFORE TTS
+            normalized_text = self._normalize_for_speech(text)
+            logger.info(f"Synthesizing voice for channel {channel_id}: {normalized_text[:100]}...")
+
             # Split text into chunks to avoid Kokoro 510 phoneme limit
-            text_chunks = self._split_text_for_tts(text)
+            text_chunks = self._split_text_for_tts(normalized_text)
 
             # Process and emit each chunk immediately
             for i, chunk in enumerate(text_chunks):

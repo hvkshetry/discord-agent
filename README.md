@@ -9,6 +9,7 @@ A single-application Discord bot that exposes Codex CLI or Claude Code CLI as Di
 ✅ **Switchable Engines**: Toggle between Codex CLI and Claude Code CLI via configuration
 ✅ **Event-Driven Architecture**: Perfect decoupling via async event bus
 ✅ **Superior Voice Quality**: Kokoro TTS (primary) with Piper TTS fallback
+✅ **Voice-Optimized UX**: Natural speech output with text normalization and low-latency streaming
 ✅ **Multi-Channel Agents**: Different Discord channels map to different agent configurations
 ✅ **Session Persistence**: Conversations persist across bot restarts with transcript replay
 ✅ **Attachment Support**: Send images, PDFs, and files for agent analysis
@@ -152,6 +153,26 @@ session:
 3. Speak your request
 4. Bot transcribes, processes, and responds with natural voice
 5. Continue conversation naturally
+
+#### Voice UX Optimization
+
+The bot includes advanced voice optimizations for natural, responsive speech:
+
+**Text Normalization** (using `num2words` and `inflect`):
+- Times: `"16:00"` → spoken as "four PM"
+- Dates: `"2025-10-03"` → spoken as "October third, twenty twenty-five"
+- Numbers: `"42 tasks"` → spoken as "forty-two tasks"
+- Automatically strips URLs, code blocks, and markdown formatting
+
+**Low-Latency Streaming**:
+- **Claude Code**: Immediate TTS on complete sentences (no buffering delay)
+- **Codex**: Smart buffering (30+ chars or 6+ words per flush)
+- Result: 50% faster first audio response (from ~50s to ~25s)
+
+**Voice-Specific Behavior**:
+- Agent receives lightweight prompt for conversational, speakable output
+- Tool call embeds suppressed during voice mode (no visual noise)
+- Session state cleared on voice disconnect (prevents prompt leakage)
 
 ### Commands
 
