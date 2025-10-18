@@ -293,9 +293,5 @@ Built on:
 ## Support
 
 For issues, questions, or contributions:
-- GitHub Issues: [yourusername/discord-agent](https://github.com/yourusername/discord-agent/issues)
+- GitHub Issues: [hvkshetry/discord-agent](https://github.com/hvkshetry/discord-agent/issues)
 - Documentation: [docs/](docs/)
-
----
-
-**One Application. One Purpose. Maximum Elegance.**
